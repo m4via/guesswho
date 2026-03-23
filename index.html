@@ -8,6 +8,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@400;500;700&display=swap" rel="stylesheet">
 <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-database-compat.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 <style>
   :root {
     --bg: #0a0a0f;
@@ -148,6 +149,16 @@
   .host-footer { display: flex; gap: 12px; justify-content: flex-end; flex-wrap: wrap; margin-top: 8px; }
 
   /* ─── LOBBY (HOST) ─── */
+  .lobby-top-row {
+    display: flex; align-items: center; justify-content: center;
+    gap: 40px; flex-wrap: wrap; text-align: center;
+  }
+  .qr-wrapper {
+    background: #fff; border-radius: 16px; padding: 16px;
+    display: flex; flex-direction: column; align-items: center;
+    box-shadow: 0 0 40px rgba(77,255,180,0.15);
+  }
+  #qr-code canvas, #qr-code img { display: block; border-radius: 4px; }
   #screen-lobby {
     align-items: center; justify-content: center; gap: 20px; text-align: center;
     background: radial-gradient(ellipse at 50% 0%, #0d1a1a 0%, var(--bg) 70%);
@@ -445,9 +456,20 @@
 
 <!-- ──────────────────────────── LOBBY ───────────────────────────── -->
 <div id="screen-lobby" class="screen">
-  <div class="lobby-pin-label">Game PIN</div>
-  <div class="lobby-pin" id="lobby-pin">------</div>
-  <div class="lobby-url" id="lobby-url"></div>
+  <div class="lobby-top-row">
+    <div style="display:flex;flex-direction:column;align-items:center;gap:6px;">
+      <div class="lobby-pin-label">Game PIN</div>
+      <div class="lobby-pin" id="lobby-pin">------</div>
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:center;">
+        <div class="lobby-url" id="lobby-url" style="font-size:11px;word-break:break-all;max-width:320px;"></div>
+        <button class="btn btn-secondary btn-xs" onclick="copyJoinUrl()">📋 Copy</button>
+      </div>
+    </div>
+    <div class="qr-wrapper">
+      <div id="qr-code"></div>
+      <div style="font-size:11px;color:var(--muted);margin-top:8px;letter-spacing:0.08em;">SCAN TO JOIN</div>
+    </div>
+  </div>
   <div class="player-count-badge"><span id="lobby-count">0</span> players joined</div>
   <div class="player-list" id="player-list"></div>
   <button class="btn btn-success" style="font-size:24px;padding:18px 48px;" onclick="startGame()">
@@ -622,6 +644,14 @@ function initFirebaseAndProceed() {
   }
 }
 
+function copyJoinUrl() {
+  const url = document.getElementById('lobby-url').dataset.url
+           || document.getElementById('lobby-url').textContent;
+  navigator.clipboard.writeText(url).then(() => toast('Link copied! 📋')).catch(() => {
+    prompt('Copy this link:', url);
+  });
+}
+
 function saveConfig(cfg) {
   try { localStorage.setItem('qb_firebase_cfg', JSON.stringify(cfg)); } catch(e){}
 }
@@ -735,10 +765,28 @@ async function saveAndLobby() {
   };
   await db.ref('games/' + gamePin).set(gameData);
 
-  // Show lobby
+  // Show lobby — embed Firebase config in join URL so players need nothing
   document.getElementById('lobby-pin').textContent = gamePin;
-  const joinUrl = window.location.origin + window.location.pathname + '?pin=' + gamePin;
+  const cfg = loadConfig();
+  const cfgEncoded = cfg ? btoa(JSON.stringify(cfg)) : '';
+  const joinUrl = window.location.origin + window.location.pathname
+    + '?pin=' + gamePin
+    + (cfgEncoded ? '&cfg=' + encodeURIComponent(cfgEncoded) : '');
   document.getElementById('lobby-url').textContent = joinUrl;
+  document.getElementById('lobby-url').dataset.url = joinUrl;
+
+  // Generate QR code
+  const qrEl = document.getElementById('qr-code');
+  qrEl.innerHTML = '';
+  new QRCode(qrEl, {
+    text: joinUrl,
+    width: 180,
+    height: 180,
+    colorDark: '#000000',
+    colorLight: '#ffffff',
+    correctLevel: QRCode.CorrectLevel.M
+  });
+
   showScreen('screen-lobby');
   listenLobby();
 }
@@ -1099,30 +1147,53 @@ function showPlayerFinal(game) {
 window.addEventListener('load', () => {
   const params = new URLSearchParams(window.location.search);
   const pin = params.get('pin');
-  if (pin) {
-    document.getElementById('join-pin').value = pin.toUpperCase();
-    showScreen('screen-join');
-    // Auto check if config saved
-    const cfg = loadConfig();
-    if (cfg && !firebase.apps.length) {
-      initFirebaseFromConfig(cfg).then(ok => {
-        if (ok) {
-          // Verify game
-          db.ref('games/' + pin).once('value').then(snap => {
-            if (!snap.val()) {
-              document.getElementById('join-error').textContent = 'Game not found.';
-              document.getElementById('join-error').style.display = 'block';
-              return;
-            }
-            gamePin = pin.toUpperCase();
-            document.getElementById('join-name').style.display = 'block';
-            document.getElementById('join-btn').textContent = 'Join! →';
-            document.getElementById('join-btn').onclick = joinGame;
-          });
-        }
-      });
-    }
+  const cfgParam = params.get('cfg');
+
+  if (!pin) return;
+
+  // Decode config from URL if present, save it
+  if (cfgParam) {
+    try {
+      const cfg = JSON.parse(atob(decodeURIComponent(cfgParam)));
+      saveConfig(cfg);
+    } catch(e) {}
   }
+
+  document.getElementById('join-pin').value = pin.toUpperCase();
+  showScreen('screen-join');
+
+  const cfg = loadConfig();
+  if (!cfg) {
+    document.getElementById('join-error').textContent = 'Missing config. Use the full link from the host.';
+    document.getElementById('join-error').style.display = 'block';
+    return;
+  }
+
+  // Auto-init Firebase and skip straight to name entry
+  initFirebaseFromConfig(cfg).then(ok => {
+    if (!ok) {
+      document.getElementById('join-error').textContent = 'Could not connect. Try the link again.';
+      document.getElementById('join-error').style.display = 'block';
+      return;
+    }
+    db.ref('games/' + pin).once('value').then(snap => {
+      if (!snap.val()) {
+        document.getElementById('join-error').textContent = 'Game not found.';
+        document.getElementById('join-error').style.display = 'block';
+        return;
+      }
+      if (snap.val().status !== 'lobby') {
+        document.getElementById('join-error').textContent = 'This game has already started.';
+        document.getElementById('join-error').style.display = 'block';
+        return;
+      }
+      gamePin = pin.toUpperCase();
+      document.getElementById('join-name').style.display = 'block';
+      document.getElementById('join-btn').textContent = 'Join! →';
+      document.getElementById('join-btn').onclick = joinGame;
+      document.getElementById('join-name').focus();
+    });
+  });
 });
 </script>
 </body>
